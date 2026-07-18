@@ -1,0 +1,10 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+pydantic==2.6.4
+
+# VULN #5: Typosquatted dependency
+# "requessts" is not the real "requests" package — a one-character typo
+# an AI assistant or a fast-moving developer could easily introduce or
+# miss during review. Sentinel AI's dependency auditor flags this via
+# Levenshtein-distance comparison against known popular package names.
+requessts==2.31.0

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+
+# NOTE: .env is intentionally NOT excluded here — this is VULN #6.
+# A properly configured .gitignore should include ".env" but this one
+# doesn't, which is exactly the kind of oversight Sentinel AI's
+# config auditor is designed to catch.
