@@ -51,7 +51,11 @@ class Settings(BaseSettings):
     github_oauth_scopes: str = "read:user user:email repo"
     oauth_token_encryption_key: SecretStr | None = None
     session_secret: SecretStr = SecretStr("replace-this-development-session-secret")
-    session_https_only: bool = False
+    # The frontend and API live on different origins in deployment.  Cookies
+    # therefore need SameSite=None and HTTPS; a local HTTP setup may override
+    # SESSION_HTTPS_ONLY=false in its uncommitted .env file only.
+    session_same_site: Literal["lax", "strict", "none"] = "none"
+    session_https_only: bool = True
 
 
 @lru_cache
