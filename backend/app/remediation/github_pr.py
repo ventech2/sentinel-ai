@@ -30,6 +30,8 @@ GITHUB_GIT_ROOT = "https://github.com"
 GITHUB_API_VERSION = "2026-03-10"
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20.0
 REPOSITORY_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+SENTINEL_GIT_AUTHOR_NAME = "Sentinel AI"
+SENTINEL_GIT_AUTHOR_EMAIL = "sentinel-ai@noreply.github.com"
 
 
 class BranchPreparationError(RuntimeError):
@@ -83,7 +85,19 @@ def prepare_isolated_branch(
         for change in changes:
             _write_checked_change(worktree_path, change)
         _git(worktree_path, "add", "--", *[change.file_path for change in changes])
-        _git(worktree_path, "commit", "-m", f"Sentinel AI remediation for finding {finding_id}")
+        # Provide the identity directly to this commit. This does not depend on
+        # (or mutate) global container Git configuration, which is absent in a
+        # fresh Railway runtime and should not be shared between remediations.
+        _git(
+            worktree_path,
+            "-c",
+            f"user.name={SENTINEL_GIT_AUTHOR_NAME}",
+            "-c",
+            f"user.email={SENTINEL_GIT_AUTHOR_EMAIL}",
+            "commit",
+            "-m",
+            f"Sentinel AI remediation for finding {finding_id}",
+        )
     except Exception as error:
         # A failure after ``worktree add`` must not leave a disposable checkout
         # behind. The source checkout/default branch remains untouched.

@@ -26,6 +26,8 @@ from app.remediation.github_pr import (
     create_github_pull_request,
     prepare_isolated_branch,
     remediation_branch_name,
+    SENTINEL_GIT_AUTHOR_EMAIL,
+    SENTINEL_GIT_AUTHOR_NAME,
 )
 from app.remediation.service import RemediationService
 from app.remediation.state_machine import InvalidRemediationTransition, transition
@@ -189,6 +191,9 @@ def test_isolated_branch_commit_never_modifies_default_checkout(tmp_path: Path) 
         assert (tmp_path / "app.py").read_text(encoding="utf-8") == source
         assert 'os.environ.get("SECRET")' in (prepared.worktree_path / "app.py").read_text(encoding="utf-8")
         assert _git(tmp_path, "branch", "--show-current") == "main"
+        assert _git(prepared.worktree_path, "log", "-1", "--format=%an <%ae>") == (
+            f"{SENTINEL_GIT_AUTHOR_NAME} <{SENTINEL_GIT_AUTHOR_EMAIL}>"
+        )
     finally:
         _git(tmp_path, "worktree", "remove", "--force", str(prepared.worktree_path))
         shutil.rmtree(prepared.worktree_path.parent, ignore_errors=True)
