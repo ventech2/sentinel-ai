@@ -1,5 +1,5 @@
 # Sentinel AI
-**An AI-native security scanner that detects — and fixes — vulnerabilities and backdoors in AI-generated ("vibe-coded") codebases.**
+**An AI-native security scanner that detects — and fixes — vulnerabilities and backdoors in AI-generated codebases.**
 
 Built for OpenAI Build Week 2026 · Track: Developer Tools
 
