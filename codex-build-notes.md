@@ -189,8 +189,6 @@ Add a new entry after every Codex session. Keep entries factual and specific —
 
 **Session ID:** 019f5e9e-7a0d-7401-b0e9-ede38d28bb6b
 
-**Note for demo video narration:** the OpenAI→Gemini pivot is a good, honest engineering story to include — shows resourcefulness under a real constraint (Codex-only credits), not a shortcut. Mention that Codex was used throughout the build and that the provider abstraction keeps GPT-5.6 swap-in-ready.
-
 ---
 
 ### Session 5 — [DATE:July 17, 2026{WAT}] — Remediation Engine (Tier 1 auto-fix + Tier 2 approval)
