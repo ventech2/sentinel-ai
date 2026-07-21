@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 from pathlib import Path
 import sys
+from time import monotonic, sleep
 from typing import Any, Literal, Protocol
 
 from app.core.config import get_settings
@@ -22,6 +23,12 @@ AI_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 MAX_CONTEXT_LINES = 15
 MAX_CONTEXT_CHARS = 12_000
 CONFIDENCE_UPDATE_DELTA = Decimal("0.15")
+# Gemini free-tier quotas are deliberately conservative.  Calls are spaced so a
+# single scan does not burst the provider, while transient capacity/rate-limit
+# responses get a bounded chance to recover before retaining the static result.
+DEFAULT_GEMINI_MIN_REQUEST_INTERVAL_SECONDS = 12.0
+DEFAULT_GEMINI_MAX_RETRIES = 2
+DEFAULT_GEMINI_RETRY_INITIAL_DELAY_SECONDS = 10.0
 
 AI_REASONING_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -168,11 +175,18 @@ class GeminiReasoningProvider:
         api_key: str | None,
         model: str = "gemini-3-flash-preview",
         timeout_seconds: float = 20.0,
+        min_request_interval_seconds: float = DEFAULT_GEMINI_MIN_REQUEST_INTERVAL_SECONDS,
+        max_retries: int = DEFAULT_GEMINI_MAX_RETRIES,
+        retry_initial_delay_seconds: float = DEFAULT_GEMINI_RETRY_INITIAL_DELAY_SECONDS,
         client: Any | None = None,
     ) -> None:
         self.model = model
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._min_request_interval_seconds = max(0.0, min_request_interval_seconds)
+        self._max_retries = max(0, max_retries)
+        self._retry_initial_delay_seconds = max(0.0, retry_initial_delay_seconds)
+        self._next_request_at = 0.0
         self._client = client
 
     def generate(self, user_prompt: str) -> str | None:
@@ -189,20 +203,42 @@ class GeminiReasoningProvider:
                 response_json_schema=AI_REASONING_SCHEMA,
             ),
         }
-        try:
-            response = self._get_client().models.generate_content(**request)
-        except Exception as error:
-            if not _is_gemini_deadline_timeout(error):
-                raise
-            print(
-                f"[AI reasoning] gemini/{self.model} returned a deadline timeout; retrying once.",
-                file=sys.stderr,
-            )
-            # The retry is intentionally limited to one identical request. Authentication,
-            # schema, quota, and other provider errors remain immediate static fallbacks.
-            response = self._get_client().models.generate_content(**request)
+        for attempt in range(self._max_retries + 1):
+            self._wait_for_request_slot()
+            try:
+                response = self._get_client().models.generate_content(**request)
+                break
+            except Exception as error:
+                if not _is_gemini_transient_error(error) or attempt >= self._max_retries:
+                    raise
+
+                retry_delay = max(
+                    self._retry_initial_delay_seconds * (2**attempt),
+                    _gemini_retry_after_seconds(error) or 0.0,
+                )
+                self._apply_cooldown(retry_delay)
+                print(
+                    "[AI reasoning] "
+                    f"gemini/{self.model} returned a retryable provider error "
+                    f"({_gemini_error_label(error)}); retrying in {retry_delay:.1f}s "
+                    f"(retry {attempt + 1} of {self._max_retries}).",
+                    file=sys.stderr,
+                )
+        else:  # Defensive: the loop either breaks with a response or raises.
+            return None
         response_text = getattr(response, "text", None)
         return response_text if isinstance(response_text, str) else None
+
+    def _wait_for_request_slot(self) -> None:
+        """Keep sequential scan requests below a small, configurable burst rate."""
+        wait_seconds = self._next_request_at - monotonic()
+        if wait_seconds > 0:
+            sleep(wait_seconds)
+        self._next_request_at = monotonic() + self._min_request_interval_seconds
+
+    def _apply_cooldown(self, retry_delay_seconds: float) -> None:
+        """Share a provider-directed retry delay with the next request in this scan."""
+        self._next_request_at = max(self._next_request_at, monotonic() + retry_delay_seconds)
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -230,6 +266,9 @@ class AIReasoningLayer:
         api_key: str | None = None,
         model: str | None = None,
         timeout_seconds: float = 20.0,
+        gemini_min_request_interval_seconds: float = DEFAULT_GEMINI_MIN_REQUEST_INTERVAL_SECONDS,
+        gemini_max_retries: int = DEFAULT_GEMINI_MAX_RETRIES,
+        gemini_retry_initial_delay_seconds: float = DEFAULT_GEMINI_RETRY_INITIAL_DELAY_SECONDS,
         context_lines: int = 12,
         client: Any | None = None,
     ) -> None:
@@ -238,6 +277,9 @@ class AIReasoningLayer:
             api_key=api_key,
             model=model,
             timeout_seconds=timeout_seconds,
+            gemini_min_request_interval_seconds=gemini_min_request_interval_seconds,
+            gemini_max_retries=gemini_max_retries,
+            gemini_retry_initial_delay_seconds=gemini_retry_initial_delay_seconds,
             client=client,
         )
         self._context_lines = min(max(context_lines, 0), MAX_CONTEXT_LINES)
@@ -264,6 +306,9 @@ class AIReasoningLayer:
             timeout_seconds=(
                 settings.gemini_timeout_seconds if provider == "gemini" else settings.openai_timeout_seconds
             ),
+            gemini_min_request_interval_seconds=settings.gemini_min_request_interval_seconds,
+            gemini_max_retries=settings.gemini_max_retries,
+            gemini_retry_initial_delay_seconds=settings.gemini_retry_initial_delay_seconds,
             context_lines=settings.ai_context_lines,
         )
 
@@ -304,6 +349,9 @@ def _build_provider(
     api_key: str | None,
     model: str | None,
     timeout_seconds: float,
+    gemini_min_request_interval_seconds: float,
+    gemini_max_retries: int,
+    gemini_retry_initial_delay_seconds: float,
     client: Any | None,
 ) -> ReasoningProvider:
     if provider == "gemini":
@@ -311,6 +359,9 @@ def _build_provider(
             api_key=api_key,
             model=model or "gemini-3-flash-preview",
             timeout_seconds=timeout_seconds,
+            min_request_interval_seconds=gemini_min_request_interval_seconds,
+            max_retries=gemini_max_retries,
+            retry_initial_delay_seconds=gemini_retry_initial_delay_seconds,
             client=client,
         )
     if provider == "openai":
@@ -483,11 +534,40 @@ def _exception_chain_message(error: Exception) -> str:
     return " <- ".join(messages)
 
 
-def _is_gemini_deadline_timeout(error: Exception) -> bool:
-    """Match Gemini's documented deadline signals and nothing broader."""
-    code = getattr(error, "code", None)
+def _is_gemini_transient_error(error: Exception) -> bool:
+    """Match only retryable Gemini transport, capacity, and rate-limit failures."""
+    code = str(getattr(error, "code", "")).strip()
+    status = str(getattr(error, "status", "")).upper()
+    return code in {"429", "500", "502", "503", "504"} or status.endswith(
+        ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED")
+    )
+
+
+def _gemini_error_label(error: Exception) -> str:
+    """Return a non-sensitive provider status for the retry diagnostic."""
     status = getattr(error, "status", None)
-    return code == 504 or status == "DEADLINE_EXCEEDED"
+    code = getattr(error, "code", None)
+    return str(status or code or type(error).__name__)
+
+
+def _gemini_retry_after_seconds(error: Exception) -> float | None:
+    """Use a server-supplied Retry-After value when the SDK exposes one."""
+    candidates = [
+        getattr(error, "retry_after", None),
+        getattr(error, "retry_after_seconds", None),
+    ]
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, Mapping):
+        candidates.append(headers.get("Retry-After") or headers.get("retry-after"))
+    for candidate in candidates:
+        try:
+            delay = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if delay >= 0:
+            return delay
+    return None
 
 
 def _apply_reasoning_result(finding: DetectorFinding, result: AIReasoningResult) -> DetectorFinding:

@@ -43,6 +43,11 @@ class DeadlineExceededError(Exception):
     status = "DEADLINE_EXCEEDED"
 
 
+class ResourceExhaustedError(Exception):
+    code = 429
+    status = "RESOURCE_EXHAUSTED"
+
+
 class TimeoutThenFailingGeminiModels:
     def __init__(self) -> None:
         self.call_count = 0
@@ -52,6 +57,18 @@ class TimeoutThenFailingGeminiModels:
         if self.call_count == 1:
             raise DeadlineExceededError("deadline exceeded")
         raise RuntimeError("second request failed")
+
+
+class RateLimitedThenSuccessfulGeminiModels:
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+        self.call_count = 0
+
+    def generate_content(self, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            raise ResourceExhaustedError("quota temporarily exhausted")
+        return SimpleNamespace(text=self.output_text)
 
 
 def _finding() -> DetectorFinding:
@@ -123,7 +140,11 @@ def test_enriches_finding_from_mocked_gemini_response(tmp_path: Path) -> None:
         "exploitability_notes": "An attacker needs access to the repository or deployed artifact.",
     }
     fake_models = FakeGeminiModels(json.dumps(response))
-    layer = AIReasoningLayer(provider="gemini", client=FakeGeminiClient(fake_models))
+    layer = AIReasoningLayer(
+        provider="gemini",
+        client=FakeGeminiClient(fake_models),
+        gemini_min_request_interval_seconds=0,
+    )
 
     enriched = layer.enrich_finding(_finding(), tmp_path)
 
@@ -141,10 +162,16 @@ def test_enriches_finding_from_mocked_gemini_response(tmp_path: Path) -> None:
     ]
 
 
-def test_gemini_deadline_timeout_retries_once_then_falls_back(tmp_path: Path, capsys) -> None:
+def test_gemini_transient_timeout_retries_once_then_falls_back(tmp_path: Path, capsys) -> None:
     (tmp_path / "app.py").write_text("one\ntwo\nAPI_KEY = 'example'\n", encoding="utf-8")
     models = TimeoutThenFailingGeminiModels()
-    layer = AIReasoningLayer(provider="gemini", client=FakeGeminiClient(models))
+    layer = AIReasoningLayer(
+        provider="gemini",
+        client=FakeGeminiClient(models),
+        gemini_min_request_interval_seconds=0,
+        gemini_max_retries=1,
+        gemini_retry_initial_delay_seconds=0,
+    )
     finding = _finding()
 
     unchanged = layer.enrich_finding(finding, tmp_path)
@@ -152,5 +179,32 @@ def test_gemini_deadline_timeout_retries_once_then_falls_back(tmp_path: Path, ca
     assert unchanged is finding
     assert models.call_count == 2
     output = capsys.readouterr().err
-    assert "returned a deadline timeout; retrying once" in output
+    assert "DEADLINE_EXCEEDED" in output
+    assert "retry 1 of 1" in output
     assert "second request failed" in output
+
+
+def test_gemini_rate_limit_retries_then_enriches_finding(tmp_path: Path, capsys) -> None:
+    (tmp_path / "app.py").write_text("one\ntwo\nAPI_KEY = 'example'\n", encoding="utf-8")
+    response = {
+        "severity": "high",
+        "confidence": 0.80,
+        "explanation": "The hardcoded credential can be copied from source control.",
+        "fix_suggestion": "Rotate the key and load it from a secret manager.",
+        "exploitability_notes": "Repository access is enough to expose the credential.",
+    }
+    models = RateLimitedThenSuccessfulGeminiModels(json.dumps(response))
+    layer = AIReasoningLayer(
+        provider="gemini",
+        client=FakeGeminiClient(models),
+        gemini_min_request_interval_seconds=0,
+        gemini_max_retries=1,
+        gemini_retry_initial_delay_seconds=0,
+    )
+
+    enriched = layer.enrich_finding(_finding(), tmp_path)
+
+    assert models.call_count == 2
+    assert enriched.ai_explanation is not None
+    assert enriched.fix_suggestion == "Rotate the key and load it from a secret manager."
+    assert "RESOURCE_EXHAUSTED" in capsys.readouterr().err

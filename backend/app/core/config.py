@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3-flash-preview"
     gemini_timeout_seconds: float = 20.0
+    # Guard against free-tier burst limits and give transient provider failures
+    # a bounded recovery path before a static-only fallback is used.
+    gemini_min_request_interval_seconds: float = 12.0
+    gemini_max_retries: int = 2
+    gemini_retry_initial_delay_seconds: float = 10.0
 
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6"
